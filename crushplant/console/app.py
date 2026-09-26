@@ -242,6 +242,8 @@ class ControlApp:
             {
                 "summary": self.runtime.batches.summary(),
                 "open": [record.as_dict() for record in self.runtime.batches.open_batches()],
+                "unsettled": [record.as_dict() for record in self.runtime.batches.unsettled()],
+                "tonnage_book": [entry.as_dict() for entry in self.runtime.batches.book.entries()],
             }
         )
 
@@ -339,6 +341,7 @@ class ControlApp:
         router.post("/api/tick", self._tick_site, "advance every line")
         router.post("/api/batches/open", self._batch_open, "open a production batch")
         router.post("/api/batches/close", self._batch_close, "close a production batch")
+        router.post("/api/batches/settle", self._batch_settle, "settle a closed batch into the tonnage book")
         router.post("/api/generation", self._set_generation, "bump the parameter generation")
         router.post("/api/snapshots", self._snapshot, "capture a record snapshot")
         router.post("/api/records/restore", self._restore, "roll the watermark back")
@@ -584,6 +587,17 @@ class ControlApp:
                 tonnes=None if tonnes is None else number(request.body, "tonnes"),
             ).as_dict()
         )
+
+    def _batch_settle(self, request: Request) -> Response:
+        code = text(request.body, "code")
+        tonnes = request.body.get("tonnes")
+        settlement = self.runtime.batches.settle(
+            code,
+            self.runtime.clock.now(),
+            self._actor(request),
+            tonnes=None if tonnes is None else number(request.body, "tonnes"),
+        )
+        return created({"settlement": settlement.as_dict(), "batch": self.runtime.batches.get(code).as_dict()})
 
     def _set_generation(self, request: Request) -> Response:
         reason = text(request.body, "reason")

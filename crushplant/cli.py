@@ -136,8 +136,8 @@ def build_parser() -> argparse.ArgumentParser:
     calibrate.add_argument("--ttl-s", type=float, default=None)
     calibrate.add_argument("--actor", default="cli")
 
-    batch = sub("batch", help="open or close a production batch")
-    batch.add_argument("action", choices=("open", "close"))
+    batch = sub("batch", help="open, close or settle a production batch")
+    batch.add_argument("action", choices=("open", "close", "settle"))
     batch.add_argument("--unit", default=None)
     batch.add_argument("--code", default=None)
     batch.add_argument("--kind", default="production")
@@ -441,11 +441,16 @@ def _batch(runtime: Runtime, args: argparse.Namespace) -> int:
             return 2
         code = args.code or runtime.issuer.issue("batch", moment)
         _emit(runtime.batches.open(code, args.unit, args.kind, moment, args.actor).as_dict())
-    else:
+    elif args.action == "close":
         if not args.code:
             _emit({"ok": False, "error": "closing a batch needs --code"})
             return 2
         _emit(runtime.batches.close(args.code, moment, args.actor, tonnes=args.tonnes).as_dict())
+    else:
+        if not args.code:
+            _emit({"ok": False, "error": "settling a batch needs --code"})
+            return 2
+        _emit(runtime.batches.settle(args.code, moment, args.actor, tonnes=args.tonnes).as_dict())
     return 0
 
 
@@ -474,6 +479,8 @@ def _batches(runtime: Runtime, args: argparse.Namespace) -> int:
         {
             "summary": runtime.batches.summary(),
             "open": [record.as_dict() for record in runtime.batches.open_batches()],
+            "unsettled": [record.as_dict() for record in runtime.batches.unsettled()],
+            "tonnage_book": [entry.as_dict() for entry in runtime.batches.book.entries()],
         }
     )
     return 0

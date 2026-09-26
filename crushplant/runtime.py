@@ -256,6 +256,7 @@ def build_namespace(config: PlantConfig) -> TagNamespace:
         specs.append(SignalSpec(f"{unit}.feed", KIND_LATCH, "", "feed latch", "safety", unit))
         specs.append(SignalSpec(f"{unit}.cone-current", KIND_CALIBRATION, "A/t/h", "cone current line", "crushing", unit))
     specs.append(SignalSpec("line.batches", KIND_BATCH, "", "production batch registry", "line", ""))
+    specs.append(SignalSpec("line.tonnage", KIND_BATCH, "t", "settled batch tonnage book", "line", ""))
     specs.append(SignalSpec("line.records", KIND_BATCH, "", "operation record stream", "line", ""))
     namespace.register_all(specs)
     return namespace
