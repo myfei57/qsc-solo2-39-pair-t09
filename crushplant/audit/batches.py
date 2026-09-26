@@ -30,6 +30,8 @@ class BatchRecord:
     closed_by: str = ""
     tonnes: float = 0.0
     notes: str = ""
+    settled_at: str = ""
+    settled_by: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -43,6 +45,8 @@ class BatchRecord:
             "closed_by": self.closed_by,
             "tonnes": self.tonnes,
             "notes": self.notes,
+            "settled_at": self.settled_at,
+            "settled_by": self.settled_by,
         }
 
     @classmethod
@@ -58,14 +62,48 @@ class BatchRecord:
             closed_by=str(raw.get("closed_by", "")),
             tonnes=float(raw.get("tonnes", 0.0)),
             notes=str(raw.get("notes", "")),
+            settled_at=str(raw.get("settled_at", "")),
+            settled_by=str(raw.get("settled_by", "")),
         )
 
     def is_open(self) -> bool:
         return self.state == BATCH_OPEN
 
+    def is_settled(self) -> bool:
+        return self.settled_at != ""
+
+
+@dataclass(frozen=True)
+class Settlement:
+    """The tonnage a closed batch booked into the operation ledger."""
+
+    code: str
+    unit: str
+    settled_at: str
+    settled_by: str
+    settled_tonnes: float
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "code": self.code,
+            "unit": self.unit,
+            "settled_at": self.settled_at,
+            "settled_by": self.settled_by,
+            "settled_tonnes": self.settled_tonnes,
+        }
+
+    def describe(self) -> str:
+        return f"{self.code} on {self.unit}: {self.settled_tonnes} t"
+
 
 class BatchRegistry:
-    """Opens and closes batches, refusing a code that is already in use."""
+    """Opens and closes batches, one open batch per line at a time.
+
+    A code is only ever used once, and a line that still has a batch running
+    refuses the next one until the first is closed.  Closing freezes the
+    tonnage; settling books that tonnage into the operation ledger exactly
+    once, so the books can be reconciled against what the line shipped.
+    """
 
     def __init__(self, store: DocumentStore, ledger: AuditLedger) -> None:
         self._store = store
@@ -111,6 +149,13 @@ class BatchRegistry:
                 code=name,
                 existing_unit=existing.unit,
                 existing_state=existing.state,
+            )
+        running = self._open_on(batches, unit)
+        if running is not None:
+            raise StateConflict(
+                "that line already has an open batch",
+                code=running.code,
+                unit=unit,
             )
         record = BatchRecord(
             code=name,
@@ -171,11 +216,55 @@ class BatchRegistry:
         )
         return closed
 
+    def settle(self, code: str, moment: datetime, actor: str) -> Settlement:
+        """Book a closed batch's tonnage into the ledger, exactly once."""
+
+        name = code.strip().upper()
+        batches = self._batches()
+        record = batches.get(name)
+        if record is None:
+            raise RecordNotFound("no such batch", code=name)
+        if record.is_open():
+            raise StateConflict("that batch is still open", code=name)
+        if record.is_settled():
+            raise StateConflict("that batch is already settled", code=name, settled_at=record.settled_at)
+        booked = BatchRecord(
+            **{
+                **record.as_dict(),
+                "settled_at": stamp(moment),
+                "settled_by": actor.strip(),
+            }
+        )
+        batches[name] = booked
+        self._save(batches, moment)
+        settlement = Settlement(
+            code=name,
+            unit=record.unit,
+            settled_at=booked.settled_at,
+            settled_by=booked.settled_by,
+            settled_tonnes=record.tonnes,
+        )
+        self._ledger.record(
+            record.unit,
+            "batch.settle",
+            OUTCOME_OK,
+            actor,
+            moment,
+            subject=name,
+            tonnes=settlement.settled_tonnes,
+        )
+        return settlement
+
     def get(self, code: str) -> BatchRecord:
         record = self._batches().get(code.strip().upper())
         if record is None:
             raise RecordNotFound("no such batch", code=code)
         return record
+
+    def open_for(self, unit: str) -> BatchRecord | None:
+        """The batch a line is running against, if it has one."""
+
+        return self._open_on(self._batches(), unit)
 
     def open_batches(self, unit: str | None = None) -> list[BatchRecord]:
         return [
@@ -183,6 +272,11 @@ class BatchRegistry:
             for record in self._batches().values()
             if record.is_open() and (unit is None or record.unit == unit)
         ]
+
+    def unsettled(self) -> list[BatchRecord]:
+        """Closed batches whose tonnage nobody has booked yet."""
+
+        return [record for record in self._batches().values() if not record.is_open() and not record.is_settled()]
 
     def codes(self) -> list[str]:
         return sorted(self._batches())
@@ -194,5 +288,17 @@ class BatchRegistry:
             "count": len(batches),
             "open": len(open_codes),
             "open_codes": open_codes,
+            "unsettled": sorted(
+                record.code for record in batches.values() if not record.is_open() and not record.is_settled()
+            ),
+            "settled": sum(1 for record in batches.values() if record.is_settled()),
             "codes": sorted(batches),
         }
+
+    # ------------------------------------------------------------- internals
+    @staticmethod
+    def _open_on(batches: dict[str, BatchRecord], unit: str) -> BatchRecord | None:
+        for record in batches.values():
+            if record.unit == unit and record.is_open():
+                return record
+        return None
